@@ -45,4 +45,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.total_epochs=20 2>&1 | tee verl_demo.log \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
- trainer.experiment_name="d1214r1_DAPO_kernelbenchlevel1_topp095" \
+ trainer.experiment_name="d1214r2_DAPO_kernelbenchlevel1_topp095" \
