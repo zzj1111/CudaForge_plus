@@ -4,6 +4,11 @@ export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
 export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
 
+mkdir -p logs
+LOGFILE="logs/qwen3_8k.txt"
+exec > "$LOGFILE" 2>&1
+
+
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
@@ -42,7 +47,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.nnodes=1 \
  trainer.save_freq=20 \
  trainer.test_freq=100 \
- trainer.total_epochs=20 2>&1 | tee verl_demo.log \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
  trainer.experiment_name="d1214r2_DAPO_kernelbenchlevel1_topp095" \
+ trainer.total_epochs=20 \
+ 2>&1 | tee ./outputs/log/8k.log
