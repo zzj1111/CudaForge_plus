@@ -8,8 +8,8 @@ set -euo pipefail
 # ----------------------------------------------------------------------
 
 # Project root (adjust if needed)
-# cd /code/hongpaul-sandbox/temp/CudaForge_plus/
-cd /home/zha00175/CudaForge_plus/verl
+cd /code/hongpaul-sandbox/temp/CudaForge_plus/
+
 # Base name for sessions
 SESSION="Qwen3_8B"
 
