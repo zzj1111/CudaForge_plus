@@ -1,9 +1,13 @@
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export REWARD_CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export REWARD_CUDA_VISIBLE_DEVICES=4
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
 export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
 #export Model_path="/home/zha00175/data/zha00175/Qwen3-30B-A3B"
+
+source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate
+conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda
+
 
 max_response_length=16384
 
