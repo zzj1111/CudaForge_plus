@@ -1,9 +1,9 @@
-export CUDA_VISIBLE_DEVICES=6,7
-export REWARD_CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export REWARD_CUDA_VISIBLE_DEVICES=3
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
-#export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
-export Model_path="/home/zha00175/data/zha00175/Qwen3-30B-A3B"
+export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
+#export Model_path="/home/zha00175/data/zha00175/Qwen3-30B-A3B"
 
 max_response_length=16384
 
@@ -12,7 +12,7 @@ loss_agg_mode="seq-mean-token-mean"
 
 
 mkdir -p logs
-LOGFILE="logs/qwen3_16k.txt"
+LOGFILE="logs/qwen3_30b_16k.txt"
 exec > "$LOGFILE" 2>&1
 
 
@@ -25,7 +25,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  data.val_files=./dataset/CudaForge/Level1/test.parquet \
  actor_rollout_ref.actor.policy_loss.loss_mode=loss_mode \
  actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
- data.train_batch_size=16 \
+ data.train_batch_size=4 \
  data.max_prompt_length=8192 \
  data.max_response_length=16384 \
  actor_rollout_ref.model.path=$Model_path \
@@ -35,7 +35,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  actor_rollout_ref.rollout.name=vllm \
  actor_rollout_ref.rollout.n=8 \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
- actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+ actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
  actor_rollout_ref.actor.fsdp_config.param_offload=False \
  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
@@ -52,7 +52,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  custom_reward_function.path=./verl/utils/reward_score/CudaForge.py \
  algorithm.kl_ctrl.kl_coef=0 \
  trainer.val_before_train=False \
- trainer.n_gpus_per_node=2 \
+ trainer.n_gpus_per_node=4 \
  trainer.nnodes=1 \
  trainer.save_freq=20 \
  trainer.test_freq=100 \
