@@ -16,7 +16,7 @@ loss_mode=gspo
 loss_agg_mode="seq-mean-token-mean"
 
 project_name=CudaForge_RL
-exp_name="d1220r2_DAPO_kernelbenchlevel1_topp080"
+exp_name="d1221r1_DAPO_kernelbenchlevel1_topp080"
 source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate
 conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda
 
@@ -67,5 +67,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.test_freq=100 \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
- trainer.experiment_name="d1220r2_DAPO_kernelbenchlevel1_topp080" \
+ trainer.experiment_name="d1221r1_DAPO_kernelbenchlevel1_topp080" \
  trainer.total_epochs=20 \
