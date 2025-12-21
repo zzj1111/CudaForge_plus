@@ -17,12 +17,11 @@ loss_agg_mode="seq-mean-token-mean"
 
 project_name=CudaForge_RL
 exp_name="d1220r2_DAPO_kernelbenchlevel1_topp080"
-
+source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate
+conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda
 
 CKPTS_DIR=/code/hongpaul-sandbox/temp/CudaForge_plus/${project_name}/${exp_name}
 
-source /mnt/data1/zha00175/miniconda/bin/activate
-conda activate verl
 
 mkdir -p logs
 
