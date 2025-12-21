@@ -21,8 +21,9 @@ exp_name="d1221r3_GSPO_kernelbenchlevel1_topp080_30B"
 
 CKPTS_DIR=/code/hongpaul-sandbox/temp/CudaForge_plus/${project_name}/${exp_name}
 
-source /mnt/data1/zha00175/miniconda/bin/activate
-conda activate verl
+
+source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate
+conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda
 
 mkdir -p logs
 
