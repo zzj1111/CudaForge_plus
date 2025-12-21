@@ -15,9 +15,6 @@ loss_mode=gspo
 loss_agg_mode="seq-mean-token-mean"
 
 
-mkdir -p logs
-LOGFILE="logs/qwen3_30b_16k.txt"
-exec > "$LOGFILE" 2>&1
 
 
 # export VLLM_ATTENTION_BACKEND=XFORMERS
