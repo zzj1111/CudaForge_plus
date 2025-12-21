@@ -8,7 +8,7 @@ set -euo pipefail
 # ----------------------------------------------------------------------
 
 # Project root (adjust if needed)
-cd /code/hongpaul-sandbox/temp/CudaForge_plus/
+#cd /code/hongpaul-sandbox/temp/CudaForge_plus/
 
 # Base name for sessions
 SESSION="Qwen3_8B"
@@ -53,7 +53,7 @@ run_in_tmux() {
 CMD_16K="cd $(pwd) && ${SCRIPT_16K} 2>&1 | tee -a ${LOGDIR}/${S16K}.log"
 CMD_8K="cd $(pwd) && ${SCRIPT_8K}  2>&1 | tee -a ${LOGDIR}/${S8K}.log"
 
-run_in_tmux "${S16K}" "${CMD_16K}"
+#run_in_tmux "${S16K}" "${CMD_16K}"
 run_in_tmux "${S8K}"  "${CMD_8K}"
 
 echo "INFO: launched:"

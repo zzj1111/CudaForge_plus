@@ -4,8 +4,8 @@ set -xeuo pipefail
 export NCCL_DEBUG=WARN
 # export VERL_LOGGING_LEVEL=DEBUG
 
-project_name='DAPO'
-exp_name='GSPO-Qwen3-30B-A3B-Base-MATH'
+project_name='GSPO'
+exp_name='GSPO-Qwen3-30B-A3B-MATH'
 
 adv_estimator=grpo
 
@@ -14,8 +14,8 @@ kl_coef=0.0
 use_kl_loss=False
 kl_loss_coef=0.0
 
-clip_ratio_low=3e-4
-clip_ratio_high=4e-4
+clip_ratio_low=0.2
+clip_ratio_high=0.28
 
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 8))
@@ -34,8 +34,8 @@ train_prompt_mini_bsz=32
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 # WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 # RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-2}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+NNODES=${NNODES:-1}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-2}
 # Paths
 # RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 # MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-30B-A3B-Base"}
@@ -43,12 +43,14 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 # TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
 # TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
-MODEL_PATH=$HDFS_ROOT/model/Qwen3-30B-A3B-Base
-CKPTS_DIR=$DATA_ROOT/checkpoint/${project_name}/${exp_name}
-TRAIN_FILE=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
-aime24_test_path=$DATA_ROOT/dataset/aime-2024.parquet
+HDFS_ROOT=${HDFS_ROOT:-"/home/zha00175/data/zha00175"}
+DATA_ROOT=${DATA_ROOT:-"/home/zha00175/GSPO_data"}
 
-TEST_FILE="['$aime24_test_path']"
+MODEL_PATH=$HDFS_ROOT/Qwen3-30B-A3B
+CKPTS_DIR=$DATA_ROOT/checkpoint/${project_name}/${exp_name}
+TRAIN_FILE=$DATA_ROOT/dataset/
+# aime24_test_path=$DATA_ROOT/dataset/aime-2024.parquet
+TEST_FILE=$DATA_ROOT/dataset/
 
 # Algorithm
 temperature=1.0

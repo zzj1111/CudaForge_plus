@@ -26,9 +26,9 @@ export NCCL_IB_HCA=mlx5
 export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1
 
 # Set how many GPUs we actually have on this node.
-export GPUS_PER_NODE=8
+export GPUS_PER_NODE=2
 
-NNODES=${SLURM_JOB_NUM_NODES}
+NNODES=1
 export NNODES
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -56,7 +56,7 @@ gpu_memory_utilization=0.8
 reward_manager=dapo
 adv_estimator=grpo
 shuffle_dataset=true
-first_time_dataset_prep=true # prepare dataset
+first_time_dataset_prep=false # prepare dataset
 
 test_freq=10
 save_freq=10
@@ -89,10 +89,10 @@ exp_name="${loss_mode}-epslow-${clip_ratio_low}-epshigh-${clip_ratio_high}-${SFT
 CKPTS_DIR=/rl/checkpoints/experimental/4b/${loss_mode}/${exp_name}
 
 # Sampling params at rollouts
-temperature=1.0
-top_p=1.0
+temperature=0.7
+top_p=0.8
 top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+val_top_p=0.8
 
 # Performance Related Parameter
 sp_size=1

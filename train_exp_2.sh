@@ -1,8 +1,9 @@
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=6,7
 export REWARD_CUDA_VISIBLE_DEVICES=7
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
-export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
+#export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
+export Model_path="/home/zha00175/data/Qwen3_8b"
 
 mkdir -p logs
 LOGFILE="logs/qwen3_8k.txt"
@@ -26,7 +27,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  actor_rollout_ref.rollout.name=vllm \
  actor_rollout_ref.rollout.n=8 \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
- actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+ actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
  actor_rollout_ref.actor.fsdp_config.param_offload=False \
  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
@@ -43,7 +44,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  custom_reward_function.path=./verl/utils/reward_score/CudaForge.py \
  algorithm.kl_ctrl.kl_coef=0 \
  trainer.val_before_train=False \
- trainer.n_gpus_per_node=4 \
+ trainer.n_gpus_per_node=2 \
  trainer.nnodes=1 \
  trainer.save_freq=20 \
  trainer.test_freq=100 \
@@ -51,4 +52,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.project_name="DAPO" \
  trainer.experiment_name="d1214r2_DAPO_kernelbenchlevel1_topp095" \
  trainer.total_epochs=20 \
- 2>&1 | tee ./outputs/log/8k.log
+#  2>&1 | tee ./outputs/log/8k.log
