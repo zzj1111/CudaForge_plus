@@ -2,17 +2,44 @@ import subprocess
 import json
 import re,os
 import sys
+import re, os, sys, time
+from datetime import datetime
 _CODEBLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 def _extract_python_code(solution_str: str) -> str:
     m = _CODEBLOCK_RE.search(solution_str)
     return (m.group(1) if m else solution_str).strip()
 
-def bench(solution_str, reference_str, device_idx=0, warmup=5, repeat=20, tol=1e-4, timeout_sec=120):
-    # 1) 提取候选代码（仍由主进程负责）
-    test_code = _extract_python_code(solution_str)
 
-    # 可选：你要是仍想做“容错改名”，保留；否则建议删掉以便更明确暴露错误
+
+def _safe_tail(s: str, n: int) -> str:
+    if not s:
+        return ""
+    return s[-n:] if len(s) > n else s
+
+def _write_jsonl(path: str, obj: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+def bench(
+    solution_str,
+    reference_str,
+    device_idx=0,
+    warmup=5,
+    repeat=20,
+    tol=1e-4,
+    timeout_sec=120,
+    *,
+    log_dir: str = "./cudaforge_logs",
+    log_on_success: bool = False,
+    max_code_chars: int = 8000,   # 防止日志文件爆炸
+    max_io_chars: int = 20000     # stdout/stderr/res log 截断
+):
+    t_start = time.time()
+
+    # 1) 提取候选代码
+    test_code = _extract_python_code(solution_str)
     if "class ModelNew" not in test_code and "class Model(" in test_code:
         test_code = test_code.replace("class Model(", "class ModelNew(", 1)
 
@@ -22,19 +49,30 @@ def bench(solution_str, reference_str, device_idx=0, warmup=5, repeat=20, tol=1e
         "warmup": warmup,
         "repeat": repeat,
         "tol": tol,
-        # 注意：device_idx 不再从主进程透传（runner 会被隔离到单卡）
     }
 
     runner = "./verl/utils/reward_score/cudaforge_runner.py"
 
-    # 2) 关键：隔离 CUDA —— runner 只看见 REWARD_CUDA_VISIBLE_DEVICES（例如 7）
+    # 2) 环境隔离
     env = os.environ.copy()
     reward_vis = env.get("REWARD_CUDA_VISIBLE_DEVICES", None)
     if reward_vis is not None:
         env["CUDA_VISIBLE_DEVICES"] = reward_vis
 
-    # 3) 因为 runner 只看见一张卡，所以 device_idx 必须是 0
+    # 每个 bench 用独立 extensions dir（避免并发冲突）
+    env["TORCH_EXTENSIONS_DIR"] = f"/tmp/torch_ext_{os.getpid()}"
+
+    # runner 只看见一张卡，所以 device_idx 必须是 0
     payload["device_idx"] = 0
+
+    # 3) 日志文件名：时间戳 + pid
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_path = os.path.join(log_dir, f"bench_{ts}_pid{os.getpid()}.jsonl")
+
+    # 为日志准备一个可控大小的 payload（避免 ref_code/test_code 过大）
+    payload_for_log = dict(payload)
+    payload_for_log["ref_code"] = _safe_tail(payload_for_log["ref_code"], max_code_chars)
+    payload_for_log["test_code"] = _safe_tail(payload_for_log["test_code"], max_code_chars)
 
     try:
         p = subprocess.run(
@@ -50,6 +88,7 @@ def bench(solution_str, reference_str, device_idx=0, warmup=5, repeat=20, tol=1e
         out = p.stdout.decode("utf-8", errors="replace").strip()
         err = p.stderr.decode("utf-8", errors="replace").strip()
 
+        # 默认：优先解析 stdout 的 JSON
         if out:
             try:
                 res = json.loads(out)
@@ -58,44 +97,92 @@ def bench(solution_str, reference_str, device_idx=0, warmup=5, repeat=20, tol=1e
                     "ok": False,
                     "kind": "bad_json",
                     "message": "Runner returned non-JSON output.",
-                    "stdout_tail": out[-2000:],
-                    "stderr_tail": err[-2000:],
-                    "returncode": p.returncode,
                 }
         else:
             res = {
                 "ok": False,
                 "kind": "no_output",
                 "message": "Runner returned empty stdout.",
-                "stderr_tail": err[-5000:],
-                "returncode": p.returncode,
             }
 
-        # 把 stderr/returncode 附到 res（便于你落盘统一分析）
+        # 附带 stderr/returncode，便于归因
         res.setdefault("returncode", p.returncode)
         if err:
-            res.setdefault("stderr_tail", err[-2000:])
+            res.setdefault("stderr_tail", _safe_tail(err, 2000))
 
+        # 控制台摘要
         print(f"[CudaForge bench] kind={res.get('kind')} ok={res.get('ok')} correct={res.get('correct', None)} msg={res.get('message', '')}")
 
+        # 4) 落盘日志（按需：失败必写；成功可选）
+        ok = bool(res.get("ok", False))
+        if (not ok) or log_on_success:
+            record = {
+                "ts": ts,
+                "pid": os.getpid(),
+                "elapsed_sec": round(time.time() - t_start, 6),
+                "timeout_sec": timeout_sec,
+                "payload_tail": payload_for_log,
+                "runner_returncode": p.returncode,
+                "runner_stdout_tail": _safe_tail(out, max_io_chars),
+                "runner_stderr_tail": _safe_tail(err, max_io_chars),
+                "runner_json": res,  # 已解析的 JSON（若 bad_json/no_output 也会记录）
+            }
+            _write_jsonl(log_path, record)
+
+    except subprocess.TimeoutExpired as e:
+        # 超时也要落盘
+        record = {
+            "ts": ts,
+            "pid": os.getpid(),
+            "elapsed_sec": round(time.time() - t_start, 6),
+            "timeout": True,
+            "timeout_sec": timeout_sec,
+            "payload_tail": payload_for_log,
+            "message": "Runner timed out.",
+            "partial_stdout_tail": _safe_tail(getattr(e, "stdout", b"").decode("utf-8", "replace") if getattr(e, "stdout", None) else "", max_io_chars),
+            "partial_stderr_tail": _safe_tail(getattr(e, "stderr", b"").decode("utf-8", "replace") if getattr(e, "stderr", None) else "", max_io_chars),
+        }
+        _write_jsonl(log_path, record)
+        print("[CudaForge bench] timeout")
+        return 0, 0.0
+
     except FileNotFoundError:
-        # runner 路径错误
-        return 0, 0.0
-    except subprocess.TimeoutExpired:
-        return 0, 0.0
-    except Exception:
+        record = {
+            "ts": ts,
+            "pid": os.getpid(),
+            "elapsed_sec": round(time.time() - t_start, 6),
+            "ok": False,
+            "kind": "runner_not_found",
+            "message": f"Runner not found: {runner}",
+            "payload_tail": payload_for_log,
+        }
+        _write_jsonl(log_path, record)
+        print("[CudaForge bench] runner_not_found")
         return 0, 0.0
 
-    # 4) 适配 runner：ok=False 代表各类失败；ok=True, correct=False 代表正确性失败（kind=correctness_error）
+    except Exception as ex:
+        record = {
+            "ts": ts,
+            "pid": os.getpid(),
+            "elapsed_sec": round(time.time() - t_start, 6),
+            "ok": False,
+            "kind": "bench_exception",
+            "message": f"bench() exception: {repr(ex)}",
+            "payload_tail": payload_for_log,
+        }
+        _write_jsonl(log_path, record)
+        print("[CudaForge bench] bench_exception")
+        return 0, 0.0
+
+    # 5) 适配 runner 结果
     if not res.get("ok", False):
-        # 你也可以在这里按 kind 做不同惩罚策略
         return 0, 0.0
-
     if not res.get("correct", False):
         return 0, 0.0
 
     speedup = float(res.get("speedup", 0.0))
     return 1, speedup
+
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None):
     # solution_str: LLM generated python code in ```python ... ```
@@ -104,8 +191,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None):
         return 0.0
     correctness, speedup = bench(solution_str, extra_info["answer"])
     print(f"correctness: {correctness}, speedup: {speedup}")
-    if(correctness>=0.9):
-        print(solution_str)
+    # if(correctness>=0.9):
+    #     print(solution_str)
     # You currently want: score = correctness*(speedup+0.1)
-    score = float(correctness) * (float(speedup) + 0.1)
+    score = float(correctness) * (float(speedup) + 0.3)
     return min(score,5)
