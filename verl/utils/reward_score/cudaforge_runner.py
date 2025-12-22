@@ -107,10 +107,13 @@ def _first_tensor(x: Any) -> torch.Tensor:
                 return t
     raise TypeError("forward output is not a Tensor (or a sequence containing a Tensor).")
 
+def _to_dev(x, dev):
+    return x.to(dev) if isinstance(x, torch.Tensor) else x
+
 
 def _run_once(model: torch.nn.Module, inp: List[torch.Tensor], dev: torch.device) -> Tuple[Any, float]:
     model.to(dev).eval()
-    inp = [x.to(dev) for x in inp]
+    inp = [_to_dev(x, dev) for x in inp]
     if dev.type == "cpu":
         import time
         t0 = time.time()
@@ -128,7 +131,7 @@ def _run_once(model: torch.nn.Module, inp: List[torch.Tensor], dev: torch.device
 
 def _bench(model: torch.nn.Module, inp: List[torch.Tensor], dev: torch.device, warm: int, rep: int) -> List[float]:
     model.to(dev).eval()
-    inp = [x.to(dev) for x in inp]
+    inp = [_to_dev(x, dev) for x in inp]
     for _ in range(warm):
         model(*inp)
 
