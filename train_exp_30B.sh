@@ -16,7 +16,7 @@ loss_mode=gspo
 loss_agg_mode="seq-mean-token-mean"
 
 project_name=CudaForge_RL
-exp_name="d1222r2_GSPO_level1_30B"
+exp_name="d1223r2_GSPO_level1_30B"
 
 
 CKPTS_DIR=/code/hongpaul-sandbox/temp/CudaForge_plus/${project_name}/${exp_name}
@@ -71,5 +71,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.test_freq=100 \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
- trainer.experiment_name="d1222r2_GSPO_topp080_30B" \
+ trainer.experiment_name="d1223r2_GSPO_topp080_30B" \
  trainer.total_epochs=10 \
