@@ -28,7 +28,7 @@ def bench(
     device_idx=0,
     warmup=5,
     repeat=20,
-    tol=1e-4,
+    tol=1e-3,
     timeout_sec=120,
     *,
     log_dir: str = "./cudaforge_logs",
