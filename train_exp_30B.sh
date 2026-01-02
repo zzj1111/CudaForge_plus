@@ -33,8 +33,8 @@ mkdir -p logs
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.project_name=CudaForge_RL \
  algorithm.adv_estimator=grpo \
- data.train_files=./dataset/CudaForge/Level1/train.parquet \
- data.val_files=./dataset/CudaForge/Level1/test.parquet \
+ data.train_files=./dataset/CudaForge/train.parquet \
+ data.val_files=./dataset/CudaForge/test.parquet \
  data.train_batch_size=16 \
  data.max_prompt_length=8192 \
  data.max_response_length=16384 \
