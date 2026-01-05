@@ -4,7 +4,7 @@ export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
 #export Model_path="/code/hongpaul-sandbox/temp/CudaForge_plus/verl/data/Qwen3_8b"
 #export Model_path="/home/zha00175/data/zha00175/Qwen3-30B-A3B"
-export Model_path="Qwen/Qwen3-30B-A3B-Instruct-2507"
+export Model_path="cognition-ai/Kevin-32B"
 
 export RAY_DEDUP_LOGS=0
 export HYDRA_FULL_ERROR=1
