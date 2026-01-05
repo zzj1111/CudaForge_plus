@@ -16,7 +16,7 @@ loss_mode=gspo
 loss_agg_mode="seq-mean-token-mean"
 
 project_name=CudaForge_RL
-exp_name="d1223r2_GSPO_level1_30B"
+exp_name="d0105r1_GSPO_level123_kevin32B"
 
 
 CKPTS_DIR=/code/hongpaul-sandbox/temp/CudaForge_plus/${project_name}/${exp_name}
