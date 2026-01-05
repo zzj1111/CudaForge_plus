@@ -191,6 +191,8 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None):
         return 0.0
     correctness, speedup = bench(solution_str, extra_info["answer"])
     print(f"correctness: {correctness}, speedup: {speedup}")
+    # print(solution_str,extra_info["question"])
+    # print(solution_str
     # if(correctness>=0.9):
     #     print(solution_str)
     # You currently want: score = correctness*(speedup+0.1)
