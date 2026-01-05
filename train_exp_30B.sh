@@ -12,8 +12,7 @@ export RAY_BACKEND_LOG_LEVEL=debug  # 有些版本支持
 
 max_response_length=16384
 
-loss_mode=gspo
-loss_agg_mode="seq-mean-token-mean"
+loss_mode=grpo
 
 project_name=CudaForge_RL
 exp_name="d0105r1_GSPO_level123_kevin32B"
@@ -45,15 +44,14 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  actor_rollout_ref.rollout.name=vllm \
  actor_rollout_ref.rollout.n=8 \
  actor_rollout_ref.actor.policy_loss.loss_mode=${loss_mode} \
- actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
  actor_rollout_ref.rollout.tensor_model_parallel_size=8 \
  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
  actor_rollout_ref.actor.fsdp_config.param_offload=True \
  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
- actor_rollout_ref.rollout.temperature=0.7 \
+ actor_rollout_ref.rollout.temperature=0.6 \
  actor_rollout_ref.rollout.top_k=20 \
- actor_rollout_ref.rollout.top_p=0.8 \
+ actor_rollout_ref.rollout.top_p=0.95 \
  actor_rollout_ref.actor.clip_ratio_low=0.0003 \
  actor_rollout_ref.actor.clip_ratio_high=0.0004 \
  critic.optim.lr=1e-5 \
@@ -71,5 +69,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.test_freq=100 \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
- trainer.experiment_name="d1223r2_GSPO_topp080_30B" \
+ trainer.experiment_name="d0106r2_GRPO_topp080_30B" \
  trainer.total_epochs=10 \
