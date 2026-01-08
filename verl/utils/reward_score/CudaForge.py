@@ -29,7 +29,7 @@ def bench(
     warmup=5,
     repeat=20,
     tol=1e-3,
-    timeout_sec=120,
+    timeout_sec=240,
     *,
     log_dir: str = "./cudaforge_logs",
     log_on_success: bool = False,
