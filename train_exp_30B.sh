@@ -37,7 +37,6 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  data.train_batch_size=16 \
  data.max_prompt_length=8192 \
  data.max_response_length=16384 \
- actor_rollout_ref.model.use_shm=True \
  actor_rollout_ref.model.lora_rank=128 \
  actor_rollout_ref.model.lora_alpha=32 \
  actor_rollout_ref.model.target_modules=all-linear \
