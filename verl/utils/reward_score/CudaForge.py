@@ -91,7 +91,7 @@ def bench(
         env["CUDA_VISIBLE_DEVICES"] = reward_vis
 
     # Each bench unique extensions dir to avoid lock / build collision
-    env["TORCH_EXTENSIONS_DIR"] = f"/tmp/torch_ext_{pid}_{ts}"
+    env["TORCH_EXTENSIONS_DIR"] = f"/dev/shm/torch_ext_{pid}_{ts}"
 
     # runner sees only 1 GPU => device_idx must be 0 inside runner
     payload["device_idx"] = 0
