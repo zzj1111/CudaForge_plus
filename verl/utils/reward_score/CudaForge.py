@@ -1,7 +1,8 @@
 import subprocess
 import json
-import re, os, sys, time
+import re, os, sys, time, traceback
 from datetime import datetime
+from pathlib import Path
 
 _CODEBLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
@@ -15,7 +16,7 @@ def _safe_tail(s: str, n: int) -> str:
     return s[-n:] if len(s) > n else s
 
 def _write_jsonl(path: str, obj: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
@@ -41,16 +42,23 @@ def bench(
     log_on_success: bool = False,
     max_code_chars: int = 8000,
     max_io_chars: int = 20000,
+    # 重要：多输入 diff（runner 会做 5 次 get_inputs）
+    num_inputs: int = 5,
+    # 重要：编译并行度（尽量显式设置，防止 server 默认很小）
+    ninja_jobs: int = 16,
+    max_jobs: int = 16,
+    # 重要：extensions 缓存策略
+    # - "unique": 每次 bench 独立目录（最安全，最容易“冷编译超时”）
+    # - "shared": reward 进程共享一个目录（大幅减少 import_test 冷编译）
+    ext_dir_mode: str = "unique",
 ):
     t_start = time.time()
 
-    # 0) log filename
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     pid = os.getpid()
     log_path = os.path.join(log_dir, f"bench_{ts}_pid{pid}.jsonl")
 
     def _log(record: dict) -> None:
-        # guarantee essentials
         record.setdefault("ts", ts)
         record.setdefault("pid", pid)
         record.setdefault("elapsed_sec", round(time.time() - t_start, 6))
@@ -62,56 +70,65 @@ def bench(
         test_code = _extract_python_code(solution_str)
     except Exception as ex:
         _log({
+            "phase": "error",
             "ok": False,
             "kind": "code_extract_error",
             "message": f"Failed to extract python code: {repr(ex)}",
+            "traceback": traceback.format_exc(),
         })
         return 0, 0.0
 
     if "class ModelNew" not in test_code and "class Model(" in test_code:
         test_code = test_code.replace("class Model(", "class ModelNew(", 1)
 
+    # 2) build payload
     payload = {
         "ref_code": reference_str,
         "test_code": test_code,
-        "warmup": warmup,
-        "repeat": repeat,
-        "tol": tol,
-        # seed：默认 100；你也可以在上层传入
+        "warmup": int(warmup),
+        "repeat": int(repeat),
+        "tol": float(tol),
         "seed": 100,
+        "device_idx": 0,              # runner 只看见一张卡 => 必须 0
+        "debug_dir": None,            # 后面赋值
+        "num_inputs": int(num_inputs) # runner 用于多输入 diff
     }
 
-    runner = "./verl/utils/reward_score/cudaforge_runner.py"
+    # runner path: 用绝对路径避免 cwd 不一致导致找不到
+    runner = os.path.abspath("./verl/utils/reward_score/cudaforge_runner.py")
     cmd = [sys.executable, runner]
 
-    # 2) env isolation: reward GPU
+    # 3) env isolation: reward GPU + 编译参数
     env = os.environ.copy()
+
     reward_vis = env.get("REWARD_CUDA_VISIBLE_DEVICES", None)
     if reward_vis is not None:
         env["CUDA_VISIBLE_DEVICES"] = reward_vis
 
-    # Each bench unique extensions dir to avoid lock / build collision
-    env["TORCH_EXTENSIONS_DIR"] = f"/dev/shm/torch_ext_{pid}_{ts}"
+    # 编译并行度（强烈建议）
+    env.setdefault("MAX_JOBS", str(max_jobs))
+    env.setdefault("NINJA_NUM_JOBS", str(ninja_jobs))
 
-    # runner sees only 1 GPU => device_idx must be 0 inside runner
-    payload["device_idx"] = 0
+    # extensions dir 策略
+    # 注意：/dev/shm 很快，但容量有限；如果任务会编译很大，可能爆 shm
+    if ext_dir_mode == "shared":
+        # 同一台机器共享缓存，显著降低 import_test 冷编译导致的 timeout
+        # 你也可以换到 /tmp/torch_ext_cache_reward
+        env["TORCH_EXTENSIONS_DIR"] = f"/tmp/torch_ext_cache_reward_cuda{env.get('CUDA_VISIBLE_DEVICES','unknown')}"
+    else:
+        env["TORCH_EXTENSIONS_DIR"] = f"/dev/shm/torch_ext_{pid}_{ts}"
 
-    # (Highly recommended for debug; can be disabled)
-    # env["CUDA_LAUNCH_BLOCKING"] = "1"
-
-    # 3) pass runner debug dir (so runner will dump stage-wise json)
-    # Use per-bench folder so you can correlate easily
+    # 4) runner debug dir
     runner_debug_dir = os.path.join(log_dir, "runner_debug", f"{ts}_pid{pid}")
     payload["debug_dir"] = runner_debug_dir
 
-    # 4) payload tail for logging (avoid huge file)
+    # 5) payload tail (avoid huge files)
     payload_for_log = {
         **payload,
         "ref_code": _safe_tail(str(payload.get("ref_code", "")), max_code_chars),
         "test_code": _safe_tail(str(payload.get("test_code", "")), max_code_chars),
     }
 
-    # log bench start (helpful for correlating later)
     _log({
         "phase": "start",
         "ok": True,
@@ -120,9 +137,10 @@ def bench(
             "CUDA_VISIBLE_DEVICES": env.get("CUDA_VISIBLE_DEVICES"),
             "REWARD_CUDA_VISIBLE_DEVICES": os.environ.get("REWARD_CUDA_VISIBLE_DEVICES"),
             "TORCH_EXTENSIONS_DIR": env.get("TORCH_EXTENSIONS_DIR"),
-            "CUDAFORGE_BENCH_DEBUG_DIR": env.get("CUDAFORGE_BENCH_DEBUG_DIR"),
+            "MAX_JOBS": env.get("MAX_JOBS"),
+            "NINJA_NUM_JOBS": env.get("NINJA_NUM_JOBS"),
         },
-        "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "debug_dir")},
+        "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir")},
         "payload_tail": payload_for_log,
     })
 
@@ -143,40 +161,25 @@ def bench(
         out = p.stdout.decode("utf-8", errors="replace").strip()
         err = p.stderr.decode("utf-8", errors="replace").strip()
 
-        # parse stdout JSON
         if out:
             try:
                 res = json.loads(out)
             except json.JSONDecodeError:
-                res = {
-                    "ok": False,
-                    "kind": "bad_json",
-                    "message": "Runner returned non-JSON output (stdout not parseable).",
-                }
+                res = {"ok": False, "kind": "bad_json", "message": "Runner stdout is not JSON."}
         else:
-            res = {
-                "ok": False,
-                "kind": "no_output",
-                "message": "Runner returned empty stdout.",
-            }
+            res = {"ok": False, "kind": "no_output", "message": "Runner returned empty stdout."}
 
-        # attach low-level process info
         res.setdefault("returncode", p.returncode)
         if err:
             res.setdefault("stderr_tail", _safe_tail(err, 2000))
 
-        # if runner wrote its own dump file, keep it (your updated runner returns dump_path)
-        runner_dump_path = res.get("dump_path", None)
-
-        # console summary
         print(
             f"[CudaForge bench] ok={res.get('ok')} correct={res.get('correct', None)} "
             f"kind={res.get('kind')} rc={p.returncode} msg={res.get('message','')}"
         )
-        if runner_dump_path:
-            print(f"[CudaForge bench] runner_dump_path={runner_dump_path}")
+        if res.get("dump_path"):
+            print(f"[CudaForge bench] runner_dump_path={res.get('dump_path')}")
 
-        # write log record: failure always, success optional
         ok = bool(res.get("ok", False))
         if (not ok) or log_on_success:
             _log({
@@ -186,23 +189,20 @@ def bench(
                 "runner_stdout_tail": _safe_tail(out, max_io_chars),
                 "runner_stderr_tail": _safe_tail(err, max_io_chars),
                 "runner_json": res,
-                "runner_dump_path": runner_dump_path,
+                "runner_dump_path": res.get("dump_path"),
                 "runner_debug_dir": runner_debug_dir,
             })
 
     except subprocess.TimeoutExpired as e:
-        # IMPORTANT: subprocess.run may provide partial stdout/stderr in e.stdout/e.stderr
         partial_out = _decode_maybe_bytes(getattr(e, "stdout", None), max_io_chars)
         partial_err = _decode_maybe_bytes(getattr(e, "stderr", None), max_io_chars)
 
-        # try to extract any JSON fragment if present (best-effort)
         inferred = {"note": "no json inferred"}
         if partial_out:
-            # attempt parse whole string
             try:
                 inferred = json.loads(partial_out)
             except Exception:
-                inferred = {"note": "partial stdout not valid json", "stdout_tail": _safe_tail(partial_out, 2000)}
+                inferred = {"note": "partial stdout not json", "stdout_tail": _safe_tail(partial_out, 2000)}
 
         _log({
             "phase": "timeout",
@@ -212,19 +212,18 @@ def bench(
             "env": {
                 "CUDA_VISIBLE_DEVICES": env.get("CUDA_VISIBLE_DEVICES"),
                 "TORCH_EXTENSIONS_DIR": env.get("TORCH_EXTENSIONS_DIR"),
+                "MAX_JOBS": env.get("MAX_JOBS"),
+                "NINJA_NUM_JOBS": env.get("NINJA_NUM_JOBS"),
             },
-            "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "debug_dir")},
+            "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir")},
             "payload_tail": payload_for_log,
             "partial_stdout_tail": partial_out,
             "partial_stderr_tail": partial_err,
             "inferred_from_partial_stdout": inferred,
             "runner_debug_dir": runner_debug_dir,
-            "hint": (
-                "If import/compile is slow or hangs, check TORCH_EXTENSIONS_DIR build logs; "
-                "if CUDA kernel illegal access, consider setting CUDA_LAUNCH_BLOCKING=1 and rerun."
-            ),
+            "hint": "Most timeouts are slow/hanging torch extension compile during import_test. Check runner_debug dump timings_ms.import_test.",
         })
-        print("[CudaForge bench] timeout (see jsonl log for details):", log_path)
+        print("[CudaForge bench] timeout (see jsonl log):", log_path)
         return 0, 0.0
 
     except FileNotFoundError:
@@ -254,7 +253,6 @@ def bench(
         print("[CudaForge bench] bench_exception (see jsonl log):", log_path)
         return 0, 0.0
 
-    # 5) adapt runner result
     if not res or not res.get("ok", False):
         return 0, 0.0
     if not res.get("correct", False):
