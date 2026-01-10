@@ -18,6 +18,9 @@ import torch.nn as nn
 from collections import defaultdict
 
 
+# ---------------------------
+# Error kinds (stable strings)
+# ---------------------------
 KIND_BAD_PAYLOAD = "bad_payload"
 KIND_CODE_INVALID = "code_invalid"
 KIND_REF_INVALID = "reference_invalid"
@@ -30,9 +33,11 @@ class CompilationError(RuntimeError):
     """Raised when dynamic import / nvcc build fails. args[0] contains full build log."""
 
 
+# ---------------------------
+# Small utilities
+# ---------------------------
 def _now_ms() -> float:
     return time.time() * 1000.0
-
 
 def _env_info() -> Dict[str, Any]:
     info: Dict[str, Any] = {
@@ -64,11 +69,9 @@ def _env_info() -> Dict[str, Any]:
         info["torch_probe_error"] = traceback.format_exc()
     return info
 
-
 def _json_print(obj: Dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(obj, ensure_ascii=False))
     sys.stdout.flush()
-
 
 def _fail(kind: str, message: str, *,
           log: Optional[str] = None,
@@ -89,6 +92,30 @@ def _fail(kind: str, message: str, *,
         out["dump_path"] = dump_path
     return out
 
+def _ensure_dir(p: Optional[str]) -> Optional[Path]:
+    if not p:
+        return None
+    d = Path(p)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _trace(debug_dir: Optional[str], event: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    d = _ensure_dir(debug_dir)
+    if d is None:
+        return
+    rec = {
+        "ts": time.strftime("%Y%m%d_%H%M%S"),
+        "t_ms": _now_ms(),
+        "pid": os.getpid(),
+        "event": event,
+    }
+    if extra:
+        rec.update(extra)
+    try:
+        (d / "runner_trace.jsonl").open("a", encoding="utf-8").write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        sys.stderr.write("[runner] failed to write trace:\n" + traceback.format_exc() + "\n")
+        sys.stderr.flush()
 
 def _maybe_dump_debug(payload: Dict[str, Any],
                       result: Dict[str, Any],
@@ -99,11 +126,12 @@ def _maybe_dump_debug(payload: Dict[str, Any],
     if not debug_dir:
         return None
     try:
-        Path(debug_dir).mkdir(parents=True, exist_ok=True)
+        d = Path(debug_dir)
+        d.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         pid = os.getpid()
         h = hashlib.md5((payload.get("test_code", "") + payload.get("ref_code", "")).encode("utf-8", errors="ignore")).hexdigest()[:8]
-        p = Path(debug_dir) / f"bench_{ts}_pid{pid}_{h}_{stage}.json"
+        p = d / f"bench_{ts}_pid{pid}_{h}_{stage}.json"
         dump_obj = {
             "stage": stage,
             "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "num_inputs")},
@@ -120,6 +148,9 @@ def _maybe_dump_debug(payload: Dict[str, Any],
         return None
 
 
+# ---------------------------
+# RNG & determinism
+# ---------------------------
 def _seed_everything(seed: Optional[int], device_idx: Optional[int] = None) -> None:
     if seed is None:
         return
@@ -143,9 +174,19 @@ def _seed_everything(seed: Optional[int], device_idx: Optional[int] = None) -> N
         torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-def _capture_import(path: Path):
+# ---------------------------
+# Dynamic import with full log capture + per-import log file
+# ---------------------------
+def _capture_import(path: Path, *, tag: str, debug_dir: Optional[str]):
     if not path.exists():
         raise FileNotFoundError(path)
+
+    d = _ensure_dir(debug_dir)
+    log_path = None
+    if d is not None:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        log_path = d / f"import_{tag}_{ts}_pid{os.getpid()}.log"
+        _trace(debug_dir, f"import_{tag}_start", {"path": str(path), "log_path": str(log_path)})
 
     mod_name = f"mod_{hashlib.md5(str(path).encode()).hexdigest()}"
     spec = importlib.util.spec_from_file_location(mod_name, path)
@@ -168,10 +209,19 @@ def _capture_import(path: Path):
             fd_buf.flush(); fd_buf.seek(0)
             sub = fd_buf.read()
 
+            if log_path is not None:
+                log_path.write_text(py_buf.getvalue() + sub, encoding="utf-8")
+
+            _trace(debug_dir, f"import_{tag}_ok", {"log_path": str(log_path) if log_path else None})
+            return module
+
         except Exception as exc:
             fd_buf.flush(); fd_buf.seek(0)
             sub = fd_buf.read()
             full_log = (py_buf.getvalue() + sub + "\n" + str(exc)).strip()
+            if log_path is not None:
+                log_path.write_text(full_log, encoding="utf-8")
+            _trace(debug_dir, f"import_{tag}_fail", {"log_path": str(log_path) if log_path else None})
             raise CompilationError(full_log) from None
 
         finally:
@@ -180,9 +230,10 @@ def _capture_import(path: Path):
             os.close(old1)
             os.close(old2)
 
-    return module
 
-
+# ---------------------------
+# Tensor helpers
+# ---------------------------
 def _first_tensor(x: Any) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         return x
@@ -192,10 +243,8 @@ def _first_tensor(x: Any) -> torch.Tensor:
                 return t
     raise TypeError("forward output is not a Tensor (or a sequence containing a Tensor).")
 
-
 def _to_dev(x: Any, dev: torch.device) -> Any:
     return x.to(dev) if isinstance(x, torch.Tensor) else x
-
 
 def _run_once(model: nn.Module, inp: List[Any], dev: torch.device) -> Tuple[Any, float]:
     model.to(dev).eval()
@@ -213,7 +262,6 @@ def _run_once(model: nn.Module, inp: List[Any], dev: torch.device) -> Tuple[Any,
     e.record()
     e.synchronize()
     return out, s.elapsed_time(e)
-
 
 def _bench(model: nn.Module, inp: List[Any], dev: torch.device, warm: int, rep: int) -> List[float]:
     model.to(dev).eval()
@@ -242,18 +290,19 @@ def _bench(model: nn.Module, inp: List[Any], dev: torch.device, warm: int, rep: 
     return ts
 
 
+# ---------------------------
+# Validation helpers
+# ---------------------------
 def _require_str(payload: Dict[str, Any], key: str) -> str:
     v = payload.get(key, None)
     if not isinstance(v, str) or not v.strip():
         raise KeyError(key)
     return v
 
-
 def _validate_candidate_code(test_code: str) -> Optional[str]:
     if "class ModelNew" not in test_code:
         return "Candidate code must define `class ModelNew(...)`."
     return None
-
 
 def _validate_reference_module(ref_mod) -> Optional[str]:
     RefModel = getattr(ref_mod, "Model", None)
@@ -261,7 +310,6 @@ def _validate_reference_module(ref_mod) -> Optional[str]:
     if RefModel is None or not callable(get_inputs):
         return "Reference must define `Model` and callable `get_inputs()`."
     return None
-
 
 def _get_init_args_kwargs(ref_mod) -> Tuple[List[Any], Dict[str, Any], Optional[str]]:
     init_args: List[Any] = []
@@ -278,6 +326,9 @@ def _get_init_args_kwargs(ref_mod) -> Tuple[List[Any], Dict[str, Any], Optional[
     return init_args, init_kwargs, None
 
 
+# ---------------------------
+# Param alignment (minimal)
+# ---------------------------
 def _named_tensors(model: nn.Module) -> Dict[str, torch.Tensor]:
     named: Dict[str, torch.Tensor] = {}
     for k, p in model.named_parameters(recurse=True):
@@ -286,14 +337,12 @@ def _named_tensors(model: nn.Module) -> Dict[str, torch.Tensor]:
         named[f"buffer::{k}"] = b
     return named
 
-
 @torch.no_grad()
 def _safe_copy_(dst: torch.Tensor, src: torch.Tensor) -> bool:
     if dst.shape != src.shape:
         return False
     dst.copy_(src.to(dtype=dst.dtype, device=dst.device))
     return True
-
 
 @torch.no_grad()
 def align_params_generic(ref_model: nn.Module, test_model: nn.Module) -> Dict[str, int]:
@@ -338,6 +387,9 @@ def align_params_generic(ref_model: nn.Module, test_model: nn.Module) -> Dict[st
     }
 
 
+# ---------------------------
+# Core bench (supports num_inputs for correctness averaging)
+# ---------------------------
 def compare_and_bench_inline(
     *,
     ref_code: str,
@@ -353,17 +405,17 @@ def compare_and_bench_inline(
     timings: Dict[str, float] = {}
     envinfo = _env_info()
 
+    _trace(debug_dir, "start", {"device_idx": device_idx, "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs})
+
     if seed is None:
         env_seed = os.environ.get("KERNELBENCH_SEED")
         seed = int(env_seed) if env_seed is not None else None
 
-    # validate candidate code
     t0 = _now_ms()
     msg = _validate_candidate_code(test_code)
     timings["validate_code"] = _now_ms() - t0
     if msg is not None:
-        res = _fail(KIND_CODE_INVALID, msg,
-                    detail={"hint": "Ensure upstream extracts ```python ...``` and passes pure python code."},
+        res = _fail(KIND_CODE_INVALID, msg, detail={"hint": "Ensure upstream extracts ```python ...``` and passes pure python code."},
                     timings=timings, env_info=envinfo)
         dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
                                   "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
@@ -379,14 +431,13 @@ def compare_and_bench_inline(
         ref_py.write_text(ref_code, encoding="utf-8")
         tst_py.write_text(test_code, encoding="utf-8")
 
-        # import reference
+        # import ref
         t0 = _now_ms()
         try:
-            ref_mod = _capture_import(ref_py)
+            ref_mod = _capture_import(ref_py, tag="ref", debug_dir=debug_dir)
         except CompilationError as e:
             timings["import_ref"] = _now_ms() - t0
-            res = _fail(KIND_COMPILE, "Failed to import/compile reference code.",
-                        log=e.args[0] if e.args else str(e),
+            res = _fail(KIND_COMPILE, "Failed to import/compile reference code.", log=e.args[0] if e.args else str(e),
                         timings=timings, env_info=envinfo)
             dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
                                       "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
@@ -396,8 +447,7 @@ def compare_and_bench_inline(
             return res
         except Exception:
             timings["import_ref"] = _now_ms() - t0
-            res = _fail(KIND_COMPILE, "Failed to import reference code (unexpected).",
-                        log=traceback.format_exc(),
+            res = _fail(KIND_COMPILE, "Failed to import reference code (unexpected).", log=traceback.format_exc(),
                         timings=timings, env_info=envinfo)
             dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
                                       "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
@@ -407,14 +457,13 @@ def compare_and_bench_inline(
             return res
         timings["import_ref"] = _now_ms() - t0
 
-        # import candidate
+        # import test
         t0 = _now_ms()
         try:
-            tst_mod = _capture_import(tst_py)
+            tst_mod = _capture_import(tst_py, tag="test", debug_dir=debug_dir)
         except CompilationError as e:
             timings["import_test"] = _now_ms() - t0
-            res = _fail(KIND_COMPILE, "Failed to import/compile candidate code.",
-                        log=e.args[0] if e.args else str(e),
+            res = _fail(KIND_COMPILE, "Failed to import/compile candidate code.", log=e.args[0] if e.args else str(e),
                         timings=timings, env_info=envinfo)
             dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
                                       "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
@@ -424,8 +473,7 @@ def compare_and_bench_inline(
             return res
         except Exception:
             timings["import_test"] = _now_ms() - t0
-            res = _fail(KIND_COMPILE, "Failed to import candidate code (unexpected).",
-                        log=traceback.format_exc(),
+            res = _fail(KIND_COMPILE, "Failed to import candidate code (unexpected).", log=traceback.format_exc(),
                         timings=timings, env_info=envinfo)
             dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
                                       "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
@@ -435,7 +483,7 @@ def compare_and_bench_inline(
             return res
         timings["import_test"] = _now_ms() - t0
 
-        # validate reference module
+        # validate ref exports
         t0 = _now_ms()
         msg = _validate_reference_module(ref_mod)
         timings["validate_ref"] = _now_ms() - t0
@@ -471,54 +519,47 @@ def compare_and_bench_inline(
                 res["dump_path"] = dump
             return res
 
-        # device setup
+        # device
         t0 = _now_ms()
         dev = torch.device(f"cuda:{device_idx}") if torch.cuda.is_available() else torch.device("cpu")
         if dev.type == "cuda":
             torch.cuda.set_device(dev)
         timings["device_setup"] = _now_ms() - t0
 
+        # run
         ctx = torch.cuda.device(dev) if dev.type == "cuda" else contextlib.nullcontext()
-
         try:
             with ctx:
-                # ---- multi-input correctness check ----
-                # we will also benchmark on the FIRST input
-                input_errs: List[Dict[str, float]] = []
-                inp0: Optional[List[Any]] = None
-
+                # multi inputs forward correctness
                 t0 = _now_ms()
-                for i in range(int(max(num_inputs, 1))):
-                    # make each input different but reproducible
-                    if seed is not None:
-                        _seed_everything(int(seed) + i, device_idx)
+                per_input = []
+                max_list = []
+                mean_list = []
 
+                # instantiate models ONCE (seeded)
+                _seed_everything(seed, device_idx)
+                ref_model = RefModel(*init_args, **init_kwargs)
+                _seed_everything(seed, device_idx)
+                test_model = ModelNew(*init_args, **init_kwargs)
+
+                # align once
+                t_align0 = _now_ms()
+                align_stats = align_params_generic(ref_model, test_model)
+                timings["align_params"] = _now_ms() - t_align0
+
+                if dev.type == "cuda":
+                    torch.cuda.synchronize(dev)
+
+                for i in range(max(1, int(num_inputs))):
+                    # seed for input generation each time (deterministic but different across i)
+                    _seed_everything((seed or 0) + i, device_idx)
                     inp = get_inputs()
                     if not isinstance(inp, (list, tuple)):
                         inp = [inp]
                     inp = list(inp)
-                    if inp0 is None:
-                        inp0 = inp
-
-                    # model init seeded (keep same init across i for fairness)
-                    if seed is not None:
-                        _seed_everything(int(seed), device_idx)
-                    ref_model = RefModel(*init_args, **init_kwargs)
-                    if seed is not None:
-                        _seed_everything(int(seed), device_idx)
-                    test_model = ModelNew(*init_args, **init_kwargs)
-
-                    # align params
-                    align_stats = align_params_generic(ref_model, test_model)
-
-                    if dev.type == "cuda":
-                        torch.cuda.synchronize(dev)
 
                     ref_out, _ = _run_once(ref_model, inp, dev)
                     tst_out, _ = _run_once(test_model, inp, dev)
-
-                    if dev.type == "cuda":
-                        torch.cuda.synchronize(dev)
 
                     ref_t = _first_tensor(ref_out).contiguous()
                     tst_t = _first_tensor(tst_out).contiguous()
@@ -528,154 +569,24 @@ def compare_and_bench_inline(
                     diff = (tst_t - ref_t).abs()
                     max_err = float(diff.max().item()) if diff.numel() > 0 else 0.0
                     mean_err = float(diff.mean().item()) if diff.numel() > 0 else 0.0
+                    per_input.append({"max_abs_err": max_err, "mean_abs_err": mean_err})
+                    max_list.append(max_err)
+                    mean_list.append(mean_err)
 
-                    input_errs.append({"max_abs_err": max_err, "mean_abs_err": mean_err})
+                if dev.type == "cuda":
+                    torch.cuda.synchronize(dev)
 
                 timings["forward_multi_inputs"] = _now_ms() - t0
 
-                # aggregate error (mean over inputs)
-                max_err_mean = float(sum(x["max_abs_err"] for x in input_errs) / max(len(input_errs), 1))
-                mean_err_mean = float(sum(x["mean_abs_err"] for x in input_errs) / max(len(input_errs), 1))
+                max_mean = float(sum(max_list) / max(len(max_list), 1))
+                mean_mean = float(sum(mean_list) / max(len(mean_list), 1))
 
-                # decision: use mean errors vs tol (your requirement)
-                # (keep a conservative allclose check on the first input, optional)
-                if max_err_mean > tol or mean_err_mean > tol:
+                # compare using mean errors
+                if (max_mean > tol) or (mean_mean > tol):
                     res = {
                         "ok": True,
                         "correct": False,
                         "kind": KIND_CORRECTNESS,
-                        "message": f"Mean errors exceed tolerance (tol={tol}).",
-                        "max_abs_err_mean": max_err_mean,
-                        "mean_abs_err_mean": mean_err_mean,
-                        "per_input_errs": input_errs,
-                        "seed": seed,
-                        "align_stats": align_stats,
-                        "device": str(dev),
-                        "timings_ms": timings,
-                        "env_info": envinfo,
-                    }
-                    dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
-                                              "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
-                                             res, stage="correctness_fail", debug_dir=debug_dir, td=td)
-                    if dump:
-                        res["dump_path"] = dump
-                    return res
-
-                # ---- benchmark using first input ----
-                assert inp0 is not None
-                # reconstruct models once for timing (seeded init + align)
-                if seed is not None:
-                    _seed_everything(int(seed), device_idx)
-                ref_model = RefModel(*init_args, **init_kwargs)
-                if seed is not None:
-                    _seed_everything(int(seed), device_idx)
-                test_model = ModelNew(*init_args, **init_kwargs)
-                t0 = _now_ms()
-                align_stats = align_params_generic(ref_model, test_model)
-                timings["align_params"] = _now_ms() - t0
-
-                t0 = _now_ms()
-                ref_times = _bench(ref_model, inp0, dev, warmup, repeat)
-                tst_times = _bench(test_model, inp0, dev, warmup, repeat)
-                if dev.type == "cuda":
-                    torch.cuda.synchronize(dev)
-                timings["benchmark"] = _now_ms() - t0
-
-                ref_avg = float(sum(ref_times) / max(len(ref_times), 1))
-                tst_avg = float(sum(tst_times) / max(len(tst_times), 1))
-                speedup = ref_avg / max(tst_avg, 1e-9)
-
-        except Exception:
-            res = _fail(
-                KIND_RUNTIME,
-                "Runtime failure during forward/benchmark.",
-                log=traceback.format_exc(),
-                detail={"seed": seed, "device": str(dev)},
-                timings=timings,
-                env_info=envinfo,
-            )
-            dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
-                                      "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
-                                     res, stage="runtime_fail", debug_dir=debug_dir, td=td)
-            if dump:
-                res["dump_path"] = dump
-            return res
-
-        res = {
-            "ok": True,
-            "correct": True,
-            "ref_avg_ms": ref_avg,
-            "tst_avg_ms": tst_avg,
-            "speedup": float(speedup),
-            "tol": float(tol),
-            "warmup": int(warmup),
-            "repeat": int(repeat),
-            "device": str(dev),
-            "seed": seed,
-            "num_inputs": int(max(num_inputs, 1)),
-            "align_stats": align_stats,
-            "max_abs_err_mean": max_err_mean,
-            "mean_abs_err_mean": mean_err_mean,
-            "per_input_errs": input_errs,
-            "timings_ms": timings,
-            "env_info": envinfo,
-        }
-        dump = _maybe_dump_debug({"ref_code": ref_code, "test_code": test_code, "device_idx": device_idx,
-                                  "warmup": warmup, "repeat": repeat, "tol": tol, "seed": seed, "num_inputs": num_inputs},
-                                 res, stage="ok", debug_dir=debug_dir, td=td)
-        if dump:
-            res["dump_path"] = dump
-        return res
-
-
-def main() -> None:
-    raw = sys.stdin.read()
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        _json_print(_fail(KIND_BAD_PAYLOAD, "Failed to parse JSON payload from stdin.",
-                          log=traceback.format_exc(),
-                          env_info=_env_info()))
-        return
-
-    try:
-        ref_code = _require_str(payload, "ref_code")
-        test_code = _require_str(payload, "test_code")
-    except KeyError as e:
-        _json_print(_fail(KIND_BAD_PAYLOAD, f"Missing required field: {str(e)}",
-                          detail={"required": ["ref_code", "test_code"]},
-                          env_info=_env_info()))
-        return
-
-    try:
-        device_idx = int(payload.get("device_idx", 0))
-        warmup = int(payload.get("warmup", 5))
-        repeat = int(payload.get("repeat", 20))
-        tol = float(payload.get("tol", 1e-4))
-        seed = payload.get("seed", 100)
-        seed = None if seed is None else int(seed)
-        debug_dir = payload.get("debug_dir", os.environ.get("CUDAFORGE_BENCH_DEBUG_DIR"))
-        debug_dir = str(debug_dir) if debug_dir else None
-        num_inputs = int(payload.get("num_inputs", 5))
-    except Exception:
-        _json_print(_fail(KIND_BAD_PAYLOAD, "Invalid numeric parameters in payload.",
-                          log=traceback.format_exc(),
-                          env_info=_env_info()))
-        return
-
-    res = compare_and_bench_inline(
-        ref_code=ref_code,
-        test_code=test_code,
-        device_idx=device_idx,
-        warmup=warmup,
-        repeat=repeat,
-        tol=tol,
-        seed=seed,
-        debug_dir=debug_dir,
-        num_inputs=num_inputs,
-    )
-    _json_print(res)
-
-
-if __name__ == "__main__":
-    main()
+                        "message": f"Mean errors exceed tol={tol}.",
+                        "max_abs_err_mean": max_mean,
+                        "mean_abs_err_mean": mean_mean,
