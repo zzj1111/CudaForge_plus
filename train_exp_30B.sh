@@ -77,4 +77,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
  trainer.logger='["console","wandb"]' \
  trainer.project_name="DAPO" \
  trainer.experiment_name="d0109r1_GRPO_topp080_32B" \
- trainer.total_epochs=10 \
+ trainer.total_epochs=5 \
