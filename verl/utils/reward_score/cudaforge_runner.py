@@ -12,10 +12,38 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
+from collections import defaultdict
 
+# ---------------------------
+# IMPORTANT: set TORCH_CUDA_ARCH_LIST BEFORE importing torch
+# ---------------------------
+def _peek_arch_list_from_stdin() -> Tuple[Optional[str], Optional[dict], Optional[str]]:
+    """
+    Read stdin once, parse JSON, and extract torch_cuda_arch_list if present.
+    Return (arch, payload_dict, raw).
+    """
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None, None, raw
+    arch = payload.get("torch_cuda_arch_list", None)
+    if arch is not None:
+        arch = str(arch).strip()
+        if not arch:
+            arch = None
+    return arch, payload, raw
+
+_arch, _payload0, _raw0 = _peek_arch_list_from_stdin()
+
+# Decide final arch list
+# Priority: payload -> existing env -> default
+_final_arch = _arch or os.environ.get("TORCH_CUDA_ARCH_LIST") or "9.0"
+os.environ["TORCH_CUDA_ARCH_LIST"] = _final_arch
+
+# Now it is safe to import torch / cpp_extension side-effects
 import torch
 import torch.nn as nn
-from collections import defaultdict
 
 
 KIND_BAD_PAYLOAD = "bad_payload"
@@ -46,6 +74,8 @@ def _env_info() -> Dict[str, Any]:
         "NINJA_NUM_JOBS": os.environ.get("NINJA_NUM_JOBS"),
         "KERNELBENCH_SEED": os.environ.get("KERNELBENCH_SEED"),
         "CUDA_LAUNCH_BLOCKING": os.environ.get("CUDA_LAUNCH_BLOCKING"),
+        # ✅ record arch list for audit
+        "TORCH_CUDA_ARCH_LIST": os.environ.get("TORCH_CUDA_ARCH_LIST"),
     }
     try:
         info["torch"] = torch.__version__
@@ -482,14 +512,11 @@ def compare_and_bench_inline(
 
         try:
             with ctx:
-                # ---- multi-input correctness check ----
-                # we will also benchmark on the FIRST input
                 input_errs: List[Dict[str, float]] = []
                 inp0: Optional[List[Any]] = None
 
                 t0 = _now_ms()
                 for i in range(int(max(num_inputs, 1))):
-                    # make each input different but reproducible
                     if seed is not None:
                         _seed_everything(int(seed) + i, device_idx)
 
@@ -500,7 +527,6 @@ def compare_and_bench_inline(
                     if inp0 is None:
                         inp0 = inp
 
-                    # model init seeded (keep same init across i for fairness)
                     if seed is not None:
                         _seed_everything(int(seed), device_idx)
                     ref_model = RefModel(*init_args, **init_kwargs)
@@ -508,7 +534,6 @@ def compare_and_bench_inline(
                         _seed_everything(int(seed), device_idx)
                     test_model = ModelNew(*init_args, **init_kwargs)
 
-                    # align params
                     align_stats = align_params_generic(ref_model, test_model)
 
                     if dev.type == "cuda":
@@ -528,17 +553,13 @@ def compare_and_bench_inline(
                     diff = (tst_t - ref_t).abs()
                     max_err = float(diff.max().item()) if diff.numel() > 0 else 0.0
                     mean_err = float(diff.mean().item()) if diff.numel() > 0 else 0.0
-
                     input_errs.append({"max_abs_err": max_err, "mean_abs_err": mean_err})
 
                 timings["forward_multi_inputs"] = _now_ms() - t0
 
-                # aggregate error (mean over inputs)
                 max_err_mean = float(sum(x["max_abs_err"] for x in input_errs) / max(len(input_errs), 1))
                 mean_err_mean = float(sum(x["mean_abs_err"] for x in input_errs) / max(len(input_errs), 1))
 
-                # decision: use mean errors vs tol (your requirement)
-                # (keep a conservative allclose check on the first input, optional)
                 if max_err_mean > tol or mean_err_mean > tol:
                     res = {
                         "ok": True,
@@ -561,15 +582,14 @@ def compare_and_bench_inline(
                         res["dump_path"] = dump
                     return res
 
-                # ---- benchmark using first input ----
                 assert inp0 is not None
-                # reconstruct models once for timing (seeded init + align)
                 if seed is not None:
                     _seed_everything(int(seed), device_idx)
                 ref_model = RefModel(*init_args, **init_kwargs)
                 if seed is not None:
                     _seed_everything(int(seed), device_idx)
                 test_model = ModelNew(*init_args, **init_kwargs)
+
                 t0 = _now_ms()
                 align_stats = align_params_generic(ref_model, test_model)
                 timings["align_params"] = _now_ms() - t0
@@ -629,14 +649,15 @@ def compare_and_bench_inline(
 
 
 def main() -> None:
-    raw = sys.stdin.read()
-    try:
-        payload = json.loads(raw)
-    except Exception:
+    # ✅ 我们已经在文件开头读过 stdin（_raw0 / _payload0），这里复用避免再次 read 空
+    if _payload0 is None:
+        # parse failed earlier
         _json_print(_fail(KIND_BAD_PAYLOAD, "Failed to parse JSON payload from stdin.",
                           log=traceback.format_exc(),
                           env_info=_env_info()))
         return
+
+    payload = _payload0
 
     try:
         ref_code = _require_str(payload, "ref_code")
