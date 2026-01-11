@@ -42,15 +42,15 @@ def bench(
     log_on_success: bool = False,
     max_code_chars: int = 8000,
     max_io_chars: int = 20000,
-    # 重要：多输入 diff（runner 会做 5 次 get_inputs）
+    # 多输入 diff
     num_inputs: int = 5,
-    # 重要：编译并行度（尽量显式设置，防止 server 默认很小）
+    # 编译并行度
     ninja_jobs: int = 16,
     max_jobs: int = 16,
-    # 重要：extensions 缓存策略
-    # - "unique": 每次 bench 独立目录（最安全，最容易“冷编译超时”）
-    # - "shared": reward 进程共享一个目录（大幅减少 import_test 冷编译）
-    ext_dir_mode: str = "unique",
+    # extensions 缓存策略：unique/shared
+    ext_dir_mode: str = "shared",
+    # ✅ 关键：只编译 H200 架构，避免“全家桶 gencode”
+    torch_cuda_arch_list: str = "9.0",
 ):
     t_start = time.time()
 
@@ -81,7 +81,7 @@ def bench(
     if "class ModelNew" not in test_code and "class Model(" in test_code:
         test_code = test_code.replace("class Model(", "class ModelNew(", 1)
 
-    # 2) build payload
+    # 2) payload
     payload = {
         "ref_code": reference_str,
         "test_code": test_code,
@@ -89,12 +89,14 @@ def bench(
         "repeat": int(repeat),
         "tol": float(tol),
         "seed": 100,
-        "device_idx": 0,              # runner 只看见一张卡 => 必须 0
-        "debug_dir": None,            # 后面赋值
-        "num_inputs": int(num_inputs) # runner 用于多输入 diff
+        "device_idx": 0,               # runner 只看见一张卡 => 必须 0
+        "debug_dir": None,             # 后面赋值
+        "num_inputs": int(num_inputs), # runner 用于多输入 diff
+        # ✅ 传给 runner：让 runner 在 import torch 前就设置
+        "torch_cuda_arch_list": str(torch_cuda_arch_list),
     }
 
-    # runner path: 用绝对路径避免 cwd 不一致导致找不到
+    # runner path: 绝对路径避免 cwd 不一致
     runner = os.path.abspath("./verl/utils/reward_score/cudaforge_runner.py")
     cmd = [sys.executable, runner]
 
@@ -105,16 +107,18 @@ def bench(
     if reward_vis is not None:
         env["CUDA_VISIBLE_DEVICES"] = reward_vis
 
-    # 编译并行度（强烈建议）
-    env.setdefault("MAX_JOBS", str(max_jobs))
-    env.setdefault("NINJA_NUM_JOBS", str(ninja_jobs))
+    # ✅ 强制覆盖，不用 setdefault（你之前踩坑就在这里）
+    env["MAX_JOBS"] = str(max_jobs)
+    env["NINJA_NUM_JOBS"] = str(ninja_jobs)
 
-    # extensions dir 策略
-    # 注意：/dev/shm 很快，但容量有限；如果任务会编译很大，可能爆 shm
+    # ✅ 同样强制覆盖 TORCH_CUDA_ARCH_LIST（主进程层面也设置一遍，双保险）
+    # 注意：最终生效以 runner 在 import torch 前的设置为准（runner 会再覆盖一次）
+    env["TORCH_CUDA_ARCH_LIST"] = str(torch_cuda_arch_list)
+
+    # extensions dir 策略（这里“不需要强制重新编译”，所以默认 shared 更合理）
     if ext_dir_mode == "shared":
-        # 同一台机器共享缓存，显著降低 import_test 冷编译导致的 timeout
-        # 你也可以换到 /tmp/torch_ext_cache_reward
-        env["TORCH_EXTENSIONS_DIR"] = f"/tmp/torch_ext_cache_reward_cuda{env.get('CUDA_VISIBLE_DEVICES','unknown')}"
+        vis = env.get("CUDA_VISIBLE_DEVICES", "unknown")
+        env["TORCH_EXTENSIONS_DIR"] = f"/tmp/torch_ext_cache_reward_cuda{vis}"
     else:
         env["TORCH_EXTENSIONS_DIR"] = f"/dev/shm/torch_ext_{pid}_{ts}"
 
@@ -122,7 +126,7 @@ def bench(
     runner_debug_dir = os.path.join(log_dir, "runner_debug", f"{ts}_pid{pid}")
     payload["debug_dir"] = runner_debug_dir
 
-    # 5) payload tail (avoid huge files)
+    # 5) payload tail
     payload_for_log = {
         **payload,
         "ref_code": _safe_tail(str(payload.get("ref_code", "")), max_code_chars),
@@ -139,8 +143,11 @@ def bench(
             "TORCH_EXTENSIONS_DIR": env.get("TORCH_EXTENSIONS_DIR"),
             "MAX_JOBS": env.get("MAX_JOBS"),
             "NINJA_NUM_JOBS": env.get("NINJA_NUM_JOBS"),
+            "TORCH_CUDA_ARCH_LIST": env.get("TORCH_CUDA_ARCH_LIST"),
         },
-        "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir")},
+        "payload_meta": {k: payload.get(k) for k in (
+            "device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir", "torch_cuda_arch_list"
+        )},
         "payload_tail": payload_for_log,
     })
 
@@ -214,8 +221,11 @@ def bench(
                 "TORCH_EXTENSIONS_DIR": env.get("TORCH_EXTENSIONS_DIR"),
                 "MAX_JOBS": env.get("MAX_JOBS"),
                 "NINJA_NUM_JOBS": env.get("NINJA_NUM_JOBS"),
+                "TORCH_CUDA_ARCH_LIST": env.get("TORCH_CUDA_ARCH_LIST"),
             },
-            "payload_meta": {k: payload.get(k) for k in ("device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir")},
+            "payload_meta": {k: payload.get(k) for k in (
+                "device_idx", "warmup", "repeat", "tol", "seed", "num_inputs", "debug_dir", "torch_cuda_arch_list"
+            )},
             "payload_tail": payload_for_log,
             "partial_stdout_tail": partial_out,
             "partial_stderr_tail": partial_err,
@@ -268,4 +278,4 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None):
     correctness, speedup = bench(solution_str, extra_info["answer"])
     print(f"correctness: {correctness}, speedup: {speedup}")
     score = float(correctness) * (float(speedup) + 0.3)
-    return min(score, 5)
+    return min(score, 3)
