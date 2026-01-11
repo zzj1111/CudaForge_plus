@@ -7,7 +7,10 @@ offline_jit_probe.py
 - 离线复现 runner 中 import_test(load_inline) 很慢/timeout
 - 打印每一步耗时，保存 import_ref/import_test 的完整编译日志
 - 每次运行强制重新编译（不使用缓存）
-- 关键加速：强制 TORCH_CUDA_ARCH_LIST=9.0（H200=sm_90），避免编译一堆无关架构
+- 强制只编译 H200 所需架构：TORCH_CUDA_ARCH_LIST=9.0（sm_90）
+
+使用：
+  python offline_jit_probe.py
 """
 
 from __future__ import annotations
@@ -18,15 +21,15 @@ import importlib.util
 import io
 import os
 import sys
-import tempfile
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Tuple, List
 
-import torch
 
-
+# -----------------------------
+# 你这次复现用的 REF / TEST 代码
+# -----------------------------
 REF_CODE = r"""
 import torch
 import torch.nn as nn
@@ -56,12 +59,18 @@ def get_init_inputs():
     return [kernel_size, stride, padding]
 """
 
+# 外层 TEST_CODE 用三双引号，内层 source/cpp_src 用三单引号，避免嵌套三引号炸裂
 TEST_CODE = r"""
 import os
 import shutil
 import torch
 import torch.nn as nn
 from torch.utils.cpp_extension import load_inline
+
+print("[TEST_CODE] python:", os.environ.get("PYTHONEXECUTABLE"))
+print("[TEST_CODE] TORCH_CUDA_ARCH_LIST:", os.environ.get("TORCH_CUDA_ARCH_LIST"))
+print("[TEST_CODE] CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("[TEST_CODE] TORCH_EXTENSIONS_DIR:", os.environ.get("TORCH_EXTENSIONS_DIR"))
 
 suffix = os.environ.get("CUDAFORGE_BUILD_SUFFIX", "")
 ext_name = f"avg_pool3d{suffix}"
@@ -175,6 +184,9 @@ class ModelNew(nn.Module):
 """
 
 
+# -----------------------------
+# 工具函数：动态 import + 日志捕获
+# -----------------------------
 def _now_ms() -> float:
     return time.time() * 1000.0
 
@@ -185,6 +197,9 @@ def _write_text(path: Path, s: str) -> None:
 
 
 def _capture_import(path: Path, log_path: Path) -> Any:
+    """
+    动态导入一个 .py，同时捕获 Python print + ninja/nvcc 子进程输出，写入 log_path。
+    """
     mod_name = f"mod_{hashlib.md5(str(path).encode()).hexdigest()}"
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
@@ -194,6 +209,7 @@ def _capture_import(path: Path, log_path: Path) -> Any:
     sys.modules[mod_name] = module
 
     py_buf = io.StringIO()
+    import tempfile
     with tempfile.TemporaryFile(mode="w+") as fd_buf, \
          contextlib.redirect_stdout(py_buf), \
          contextlib.redirect_stderr(py_buf):
@@ -228,7 +244,7 @@ def _capture_import(path: Path, log_path: Path) -> Any:
     return module
 
 
-def _run_forward(model: torch.nn.Module, inp: List[torch.Tensor], dev: torch.device) -> Tuple[Any, float]:
+def _run_forward(model, inp: List["torch.Tensor"], dev: "torch.device") -> Tuple[Any, float]:
     model.to(dev).eval()
     inp = [x.to(dev) for x in inp]
     if dev.type == "cuda":
@@ -259,23 +275,29 @@ def main() -> None:
     # 2) 强制每次新编译：唯一扩展名 suffix
     os.environ["CUDAFORGE_BUILD_SUFFIX"] = f"_{ts}_pid{pid}"
 
-    # 3) 关键加速：只编译 H200 所需架构（sm_90）
-    #    你也可以改成 "9.0+PTX"（会多生成 PTX，兼容性更强但稍慢一点）
-    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "9.0")
+    # 3) 关键：强制覆盖（不要 setdefault）
+    #    如果你想要更强兼容，可用 "9.0+PTX"，但会更慢一点
+    prev_arch = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 
-    # 4) 可选：固定 ninja 并行度（你慢服务器日志里显示 Allowing ninja default…）
-    #    如果你希望更可控，可取消注释：
-    # os.environ.setdefault("MAX_JOBS", "16")
-    # os.environ.setdefault("NINJA_NUM_JOBS", "16")
+    # 4) 可选：固定并行度（你现在是 None，让 ninja 自己选也行）
+    # os.environ["MAX_JOBS"] = "16"
+    # os.environ["NINJA_NUM_JOBS"] = "16"
+
+    # 重要：环境变量设置完再 import torch
+    global torch
+    import torch  # noqa: F401
 
     print("==== offline_jit_probe ====")
     print("workdir:", td.resolve())
     print("python:", sys.version.split()[0])
+    print("sys.executable:", sys.executable)
     print("torch:", torch.__version__)
     print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
     print("TORCH_EXTENSIONS_DIR:", os.environ.get("TORCH_EXTENSIONS_DIR"))
     print("CUDAFORGE_BUILD_SUFFIX:", os.environ.get("CUDAFORGE_BUILD_SUFFIX"))
-    print("TORCH_CUDA_ARCH_LIST:", os.environ.get("TORCH_CUDA_ARCH_LIST"))
+    print("TORCH_CUDA_ARCH_LIST(prev):", prev_arch)
+    print("TORCH_CUDA_ARCH_LIST(now):", os.environ.get("TORCH_CUDA_ARCH_LIST"))
     print("MAX_JOBS:", os.environ.get("MAX_JOBS"))
     print("NINJA_NUM_JOBS:", os.environ.get("NINJA_NUM_JOBS"))
     print("CUDA_LAUNCH_BLOCKING:", os.environ.get("CUDA_LAUNCH_BLOCKING"))
@@ -311,6 +333,7 @@ def main() -> None:
 
     RefModel = getattr(ref_mod, "Model")
     ModelNew = getattr(test_mod, "ModelNew")
+
     t0 = _now_ms()
     ref_model = RefModel(*init_args)
     test_model = ModelNew()
@@ -331,7 +354,9 @@ def main() -> None:
     print("Logs preserved:")
     print(" - import_ref.log :", ref_log.resolve())
     print(" - import_test.log:", test_log.resolve())
-    print("If import_test is still slow, open import_test.log and check where it pauses (c++/nvcc/ld).")
+    print("Build dir (forced fresh each run):")
+    print(" - TORCH_EXTENSIONS_DIR:", os.environ.get("TORCH_EXTENSIONS_DIR"))
+    print("If nvcc still uses many gencodes, check import_test.log and also the printed [TEST_CODE] TORCH_CUDA_ARCH_LIST.")
 
 
 if __name__ == "__main__":
