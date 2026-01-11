@@ -3,25 +3,11 @@
 """
 offline_jit_probe.py
 
-目的：
-- 单独离线复现你的 runner 中 "import_test 很慢/timeout" 的场景
-- 把每一步耗时打出来：import ref / import test(load_inline) / 构造模型 / forward
-- 将 load_inline 的 stdout/stderr（ninja/nvcc/ld 等）落盘到日志文件，便于定位卡住点
-
-关键特性：
-- 强制每次运行重新编译（不使用 torch extension 缓存）
-  1) 本脚本会把 TORCH_EXTENSIONS_DIR 指到本次 probe 目录下的 torch_ext/
-  2) TEST_CODE 中的 load_inline 使用唯一 name + 显式 build_directory
-  3) 编译前会 rmtree(build_directory)
-
-使用：
-  python offline_jit_probe.py
-
-可选环境变量（你也可以不设）：
-  CUDA_VISIBLE_DEVICES=0
-  MAX_JOBS=16
-  NINJA_NUM_JOBS=16
-  CUDA_LAUNCH_BLOCKING=1   # 若怀疑 kernel illegal access 导致同步卡住
+目标：
+- 离线复现 runner 中 import_test(load_inline) 很慢/timeout
+- 打印每一步耗时，保存 import_ref/import_test 的完整编译日志
+- 每次运行强制重新编译（不使用缓存）
+- 关键加速：强制 TORCH_CUDA_ARCH_LIST=9.0（H200=sm_90），避免编译一堆无关架构
 """
 
 from __future__ import annotations
@@ -41,9 +27,6 @@ from typing import Any, Tuple, List
 import torch
 
 
-# -----------------------------
-# 你这次复现用的 REF / TEST 代码
-# -----------------------------
 REF_CODE = r"""
 import torch
 import torch.nn as nn
@@ -73,10 +56,6 @@ def get_init_inputs():
     return [kernel_size, stride, padding]
 """
 
-# 强制重新编译的关键点在这里：
-# - name 使用环境变量 CUDAFORGE_BUILD_SUFFIX 拼接成唯一值
-# - build_directory 指到 TORCH_EXTENSIONS_DIR 下的独立目录
-# - 编译前先 rmtree(build_directory)，保证不复用任何旧产物
 TEST_CODE = r"""
 import os
 import shutil
@@ -109,10 +88,7 @@ __global__ void avg_pool3d_kernel(const float* input, float* output,
                                   int in_depth, int in_height, int in_width,
                                   int out_depth, int out_height, int out_width) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx >= batch_size * channels * out_depth * out_height * out_width) {
-        return;
-    }
+    if (idx >= batch_size * channels * out_depth * out_height * out_width) return;
 
     int w = idx % out_width;
     int h = (idx / out_width) % out_height;
@@ -180,7 +156,6 @@ cpp_src = r'''
 torch::Tensor avg_pool3d_cuda(torch::Tensor input);
 '''
 
-# 显式 build_directory + 唯一 name，保证不走缓存
 avg_pool3d = load_inline(
     name=ext_name,
     cpp_sources=cpp_src,
@@ -200,9 +175,6 @@ class ModelNew(nn.Module):
 """
 
 
-# -----------------------------
-# 工具函数：动态 import + 日志捕获
-# -----------------------------
 def _now_ms() -> float:
     return time.time() * 1000.0
 
@@ -213,9 +185,6 @@ def _write_text(path: Path, s: str) -> None:
 
 
 def _capture_import(path: Path, log_path: Path) -> Any:
-    """
-    动态导入一个 .py，同时捕获 Python print + ninja/nvcc 子进程输出，写入 log_path。
-    """
     mod_name = f"mod_{hashlib.md5(str(path).encode()).hexdigest()}"
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
@@ -277,22 +246,27 @@ def _run_forward(model: torch.nn.Module, inp: List[torch.Tensor], dev: torch.dev
 
 
 def main() -> None:
-    # 固定、可复现、不会自动删除的目录
     ts = time.strftime("%Y%m%d_%H%M%S")
     pid = os.getpid()
     td = Path(f"./offline_probe_{ts}_pid{pid}")
     td.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------
-    # 强制每次重新编译：关键环境设置
-    # ------------------------------
-    # 每次运行都用独立 TORCH_EXTENSIONS_DIR（本次 probe 目录内）
+    # 1) 强制每次新编译：独立 TORCH_EXTENSIONS_DIR
     torch_ext_dir = td / "torch_ext"
     torch_ext_dir.mkdir(parents=True, exist_ok=True)
     os.environ["TORCH_EXTENSIONS_DIR"] = str(torch_ext_dir.resolve())
 
-    # 唯一 suffix，确保 load_inline(name=...) 每次不同
+    # 2) 强制每次新编译：唯一扩展名 suffix
     os.environ["CUDAFORGE_BUILD_SUFFIX"] = f"_{ts}_pid{pid}"
+
+    # 3) 关键加速：只编译 H200 所需架构（sm_90）
+    #    你也可以改成 "9.0+PTX"（会多生成 PTX，兼容性更强但稍慢一点）
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "9.0")
+
+    # 4) 可选：固定 ninja 并行度（你慢服务器日志里显示 Allowing ninja default…）
+    #    如果你希望更可控，可取消注释：
+    # os.environ.setdefault("MAX_JOBS", "16")
+    # os.environ.setdefault("NINJA_NUM_JOBS", "16")
 
     print("==== offline_jit_probe ====")
     print("workdir:", td.resolve())
@@ -301,6 +275,7 @@ def main() -> None:
     print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
     print("TORCH_EXTENSIONS_DIR:", os.environ.get("TORCH_EXTENSIONS_DIR"))
     print("CUDAFORGE_BUILD_SUFFIX:", os.environ.get("CUDAFORGE_BUILD_SUFFIX"))
+    print("TORCH_CUDA_ARCH_LIST:", os.environ.get("TORCH_CUDA_ARCH_LIST"))
     print("MAX_JOBS:", os.environ.get("MAX_JOBS"))
     print("NINJA_NUM_JOBS:", os.environ.get("NINJA_NUM_JOBS"))
     print("CUDA_LAUNCH_BLOCKING:", os.environ.get("CUDA_LAUNCH_BLOCKING"))
@@ -318,19 +293,14 @@ def main() -> None:
     ref_py.write_text(REF_CODE, encoding="utf-8")
     test_py.write_text(TEST_CODE, encoding="utf-8")
 
-    # 1) import ref
     t0 = _now_ms()
     ref_mod = _capture_import(ref_py, ref_log)
-    t_ref = _now_ms() - t0
-    print(f"\n[1] import ref: {t_ref:.3f} ms   (log: {ref_log.resolve()})")
+    print(f"\n[1] import ref: {_now_ms() - t0:.3f} ms   (log: {ref_log.resolve()})")
 
-    # 2) import test (关键：load_inline 在这里执行 + 强制重新编译)
     t0 = _now_ms()
     test_mod = _capture_import(test_py, test_log)
-    t_test = _now_ms() - t0
-    print(f"[2] import test: {t_test:.3f} ms   (log: {test_log.resolve()})")
+    print(f"[2] import test: {_now_ms() - t0:.3f} ms   (log: {test_log.resolve()})")
 
-    # 3) get inputs
     get_inputs = getattr(ref_mod, "get_inputs")
     get_init_inputs = getattr(ref_mod, "get_init_inputs", None)
     init_args = list(get_init_inputs()) if callable(get_init_inputs) else []
@@ -339,23 +309,18 @@ def main() -> None:
         inp = [inp]
     inp = list(inp)
 
-    # 4) construct models
     RefModel = getattr(ref_mod, "Model")
     ModelNew = getattr(test_mod, "ModelNew")
     t0 = _now_ms()
     ref_model = RefModel(*init_args)
     test_model = ModelNew()
-    t_ctor = _now_ms() - t0
-    print(f"[3] construct models: {t_ctor:.3f} ms")
+    print(f"[3] construct models: {_now_ms() - t0:.3f} ms")
 
-    # 5) forward
     t0 = _now_ms()
     out_ref, ms_ref = _run_forward(ref_model, inp, dev)
     out_tst, ms_tst = _run_forward(test_model, inp, dev)
-    t_fwd = _now_ms() - t0
-    print(f"[4] forward total: {t_fwd:.3f} ms   (ref {ms_ref:.3f} ms, test {ms_tst:.3f} ms)")
+    print(f"[4] forward total: {_now_ms() - t0:.3f} ms   (ref {ms_ref:.3f} ms, test {ms_tst:.3f} ms)")
 
-    # 6) basic sanity check
     if isinstance(out_ref, torch.Tensor) and isinstance(out_tst, torch.Tensor):
         diff = (out_tst - out_ref).abs()
         print("[5] diff: max=", float(diff.max().item()), "mean=", float(diff.mean().item()))
@@ -366,9 +331,7 @@ def main() -> None:
     print("Logs preserved:")
     print(" - import_ref.log :", ref_log.resolve())
     print(" - import_test.log:", test_log.resolve())
-    print("Build dir (forced fresh each run):")
-    print(" - TORCH_EXTENSIONS_DIR:", Path(os.environ["TORCH_EXTENSIONS_DIR"]).resolve())
-    print("If it is slow/hangs, inspect import_test.log; it should contain ninja/nvcc/ld logs.")
+    print("If import_test is still slow, open import_test.log and check where it pauses (c++/nvcc/ld).")
 
 
 if __name__ == "__main__":
